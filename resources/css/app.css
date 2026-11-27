@@ -1,0 +1,40 @@
+@import 'tailwindcss';
+
+@source '../../vendor/laravel/framework/src/Illuminate/Pagination/resources/views/*.blade.php';
+@source '../../storage/framework/views/*.php';
+
+@theme {
+    --font-sans: var(--font-plus-jakarta-sans), "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+    --font-serif: var(--font-plus-jakarta-sans), "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+    --color-kertas: #f4f7f5;
+    --color-tinta: #14211b;
+    --color-hijau: #0d7a55;
+    --color-hijau-dalam: #0a3d2c;
+    --color-daun: #15956b;
+    --color-pasir: #e7f6ee;
+    --color-tanah: #c2410c;
+    --color-garis: #e3ebe6;
+    --color-lembar: #ffffff;
+}
+
+@layer components {
+    .tombol {
+        @apply inline-flex min-h-12 items-center justify-center rounded-full bg-hijau px-5 text-sm font-semibold tracking-tight text-white shadow-sm transition hover:bg-hijau-dalam;
+    }
+
+    .tombol-tenang {
+        @apply inline-flex min-h-12 items-center justify-center rounded-full border border-garis bg-white px-5 text-sm font-semibold tracking-tight text-tinta transition hover:border-hijau hover:text-hijau;
+    }
+
+    .bidang {
+        @apply min-h-12 w-full rounded-2xl border border-garis bg-white px-4 text-base text-tinta outline-none transition focus:border-hijau focus:ring-4 focus:ring-hijau/10;
+    }
+
+    .bidang-salah {
+        @apply border-tanah focus:border-tanah focus:ring-tanah/20;
+    }
+
+    .kartu {
+        @apply rounded-3xl border border-garis bg-lembar p-5 shadow-[0_10px_30px_rgba(13,40,28,0.04)];
+    }
+}
