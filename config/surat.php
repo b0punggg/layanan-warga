@@ -19,6 +19,8 @@ return [
     /*
     | kanal=catat menyimpan pesan di aplikasi.
     | kanal=whatsapp mengirim JSON {pengirim, tujuan, pesan} ke gateway, lalu email jika gagal.
+    | Surat selesai dikirim sebagai dokumen ke whatsapp_dokumen_url. Jika URL itu kosong
+    | dan whatsapp_url berakhiran /kirim, pintu dokumen memakai jalur yang sama dengan akhiran /dokumen.
     | pengirim adalah nomor WhatsApp kalurahan yang mengirim kode verifikasi.
     */
     /*
@@ -36,6 +38,7 @@ return [
         'kanal' => env('NOTIFIKASI_KANAL', 'catat'),
         'nomor_whatsapp' => env('KALURAHAN_WHATSAPP', '0881080712007'),
         'whatsapp_url' => env('WHATSAPP_GATEWAY_URL'),
+        'whatsapp_dokumen_url' => env('WHATSAPP_GATEWAY_DOKUMEN_URL'),
         'whatsapp_token' => env('WHATSAPP_GATEWAY_TOKEN'),
     ],
 

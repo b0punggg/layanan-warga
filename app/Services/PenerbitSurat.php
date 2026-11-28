@@ -14,8 +14,10 @@ use App\Models\User;
 use Dompdf\Dompdf;
 use Dompdf\Options;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use RuntimeException;
+use Throwable;
 
 class PenerbitSurat
 {
@@ -151,7 +153,9 @@ class PenerbitSurat
 
     public function terbitkan(Pengajuan $pengajuan, User $operator, string $pdf, ?string $pesan = null): void
     {
-        DB::transaction(function () use ($pengajuan, $operator, $pdf, $pesan) {
+        $catatan = $this->pesanBersih($pesan);
+
+        DB::transaction(function () use ($pengajuan, $operator, $pdf, $catatan) {
             $pengajuan->refresh();
 
             if ($pengajuan->status !== StatusPengajuan::Disetujui || $pengajuan->surat === null) {
@@ -166,13 +170,17 @@ class PenerbitSurat
             $this->berkas->simpan($pdf, $path);
             $pengajuan->surat->update(['file_pdf' => $path]);
             $pengajuan->update(['tanggal_selesai' => now()]);
-            $this->ubahStatus($pengajuan, StatusPengajuan::Selesai, $operator, $this->pesanBersih($pesan));
+            $this->ubahStatus($pengajuan, StatusPengajuan::Selesai, $operator, $catatan, false);
         });
+
+        $this->sampaikanSelesai($pengajuan, $catatan);
     }
 
     public function kirimFormat(Pengajuan $pengajuan, User $operator, string $berkas, string $pesan): void
     {
-        DB::transaction(function () use ($pengajuan, $operator, $berkas, $pesan) {
+        $catatan = $this->pesanBersih($pesan);
+
+        DB::transaction(function () use ($pengajuan, $operator, $berkas, $catatan) {
             $pengajuan->refresh();
             $pengajuan->loadMissing('jenisLayanan');
 
@@ -190,8 +198,10 @@ class PenerbitSurat
                 'file_hasil' => $path,
                 'tanggal_selesai' => now(),
             ]);
-            $this->ubahStatus($pengajuan, StatusPengajuan::Selesai, $operator, $this->pesanBersih($pesan));
+            $this->ubahStatus($pengajuan, StatusPengajuan::Selesai, $operator, $catatan, false);
         });
+
+        $this->sampaikanSelesai($pengajuan, $catatan);
     }
 
     private function pesanBersih(?string $pesan): ?string
@@ -335,6 +345,65 @@ class PenerbitSurat
     private function beritahu(Pengajuan $pengajuan, StatusPengajuan $baru, ?string $catatan): void
     {
         $pengajuan->loadMissing(['pemohon', 'jenisLayanan']);
+        $this->pesan->keAkun($pengajuan->pemohon, $this->teksStatus($pengajuan, $baru, $catatan));
+    }
+
+    private function sampaikanSelesai(Pengajuan $pengajuan, ?string $catatan): void
+    {
+        $pengajuan->refresh();
+        $pengajuan->unsetRelation('surat');
+        $pengajuan->loadMissing(['pemohon', 'jenisLayanan', 'surat']);
+        $isi = $this->teksStatus($pengajuan, StatusPengajuan::Selesai, $catatan);
+        $lampiran = null;
+
+        try {
+            $lampiran = $this->lampiranSelesai($pengajuan);
+        } catch (Throwable $e) {
+            Log::warning('berkas selesai tidak dapat dibaca', ['pengajuan' => $pengajuan->id, 'pesan' => $e->getMessage()]);
+        }
+
+        if ($lampiran === null) {
+            $this->pesan->keAkun($pengajuan->pemohon, $isi);
+
+            return;
+        }
+
+        $this->pesan->keAkunDenganBerkas($pengajuan->pemohon, $isi, $lampiran);
+    }
+
+    /**
+     * @return array{isi: string, nama: string, mime: string}|null
+     */
+    private function lampiranSelesai(Pengajuan $pengajuan): ?array
+    {
+        if (filled($pengajuan->surat?->file_pdf)) {
+            return [
+                'isi' => $this->berkas->baca((string) $pengajuan->surat->file_pdf),
+                'nama' => $this->namaBerkas((string) ($pengajuan->surat->nomor_surat ?: $pengajuan->kode_tiket), 'pdf'),
+                'mime' => 'application/pdf',
+            ];
+        }
+
+        if ($pengajuan->jenisLayanan->pernyataan && filled($pengajuan->file_hasil)) {
+            return [
+                'isi' => $this->berkas->baca((string) $pengajuan->file_hasil),
+                'nama' => $this->namaBerkas($pengajuan->kode_tiket, 'docx'),
+                'mime' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            ];
+        }
+
+        return null;
+    }
+
+    private function namaBerkas(string $dasar, string $ekstensi): string
+    {
+        $nama = Str::slug(str_replace(['/', '\\'], '-', $dasar));
+
+        return ($nama !== '' ? $nama : 'surat').'.'.$ekstensi;
+    }
+
+    private function teksStatus(Pengajuan $pengajuan, StatusPengajuan $baru, ?string $catatan): string
+    {
         $isi = 'Pengajuan '.$pengajuan->kode_tiket.' ('.$pengajuan->jenisLayanan->nama.') sekarang berstatus '.$baru->label().'.';
 
         if ($baru === StatusPengajuan::Diajukan && $pengajuan->status_pengantar_rt === StatusPengantarRt::MenungguRt) {
@@ -355,6 +424,6 @@ class PenerbitSurat
             $isi .= ' Catatan: '.$catatan;
         }
 
-        $this->pesan->keAkun($pengajuan->pemohon, $isi);
+        return $isi;
     }
 }

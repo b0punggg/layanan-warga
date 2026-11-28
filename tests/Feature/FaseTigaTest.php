@@ -9,6 +9,7 @@ use App\Enums\StatusPengajuan;
 use App\Enums\StatusVerifikasiProfil;
 use App\Models\Informasi;
 use App\Models\JenisLayanan;
+use App\Models\Notifikasi;
 use App\Models\Penduduk;
 use App\Models\Pengaduan;
 use App\Models\Pengajuan;
@@ -16,9 +17,12 @@ use App\Models\ProfilWarga;
 use App\Models\Surat;
 use App\Models\User;
 use App\Services\BerkasPrivat;
+use App\Services\PenerbitSurat;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\Client\Request;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Http;
+use Psr\Http\Message\StreamInterface;
 use Tests\TestCase;
 
 class FaseTigaTest extends TestCase
@@ -223,5 +227,160 @@ class FaseTigaTest extends TestCase
         $pdf = app(BerkasPrivat::class)->baca($pengajuan->fresh()->surat->file_pdf);
         $this->assertStringStartsWith('%PDF-TERSERTIFIKASI', $pdf);
         $this->assertSame(StatusPengajuan::Selesai, $pengajuan->fresh()->status);
+    }
+
+    public function test_surat_selesai_mengirim_pdf_ke_whatsapp(): void
+    {
+        $pdf = '%PDF-1.4 surat-selesai';
+        [$warga, $pengajuan] = $this->pengajuanDisetujui('081234567890');
+        $this->siapkanWhatsapp();
+
+        $this->actingAs(User::factory()->create(['peran' => Peran::Operator]))
+            ->post(route('operator.pengajuan.terbit', $pengajuan), [
+                'berkas_tte' => UploadedFile::fake()->createWithContent('tte.pdf', $pdf),
+                'pesan' => 'Silakan disimpan.',
+            ])->assertRedirect();
+
+        Http::assertSent(fn ($permintaan) => $permintaan->url() === 'https://gateway.test/dokumen'
+            && $permintaan->hasHeader('Authorization', 'Bearer token-uji')
+            && $this->bagian($permintaan, 'tujuan') === '081234567890'
+            && str_contains((string) $this->bagian($permintaan, 'pesan'), 'Silakan disimpan.')
+            && $this->bagian($permintaan, 'berkas') === $pdf
+            && $this->namaBagian($permintaan, 'berkas') === 'nikah-1-xi-2026.pdf');
+        Http::assertNotSent(fn ($permintaan) => $permintaan->url() === 'https://gateway.test/kirim');
+        $this->assertDatabaseHas('notifikasi', [
+            'user_id' => $warga->id,
+            'kanal' => 'whatsapp',
+            'status_kirim' => 'terkirim',
+        ]);
+    }
+
+    public function test_gagal_dokumen_tetap_mengirim_pesan_teks(): void
+    {
+        [$warga, $pengajuan] = $this->pengajuanDisetujui('081234567891');
+        $this->siapkanWhatsapp(dokumenBerhasil: false);
+
+        $this->actingAs(User::factory()->create(['peran' => Peran::Operator]))
+            ->post(route('operator.pengajuan.terbit', $pengajuan), [
+                'berkas_tte' => UploadedFile::fake()->createWithContent('tte.pdf', '%PDF-1.4'),
+                'pesan' => 'Cek aplikasi.',
+            ])->assertRedirect();
+
+        Http::assertSent(fn ($permintaan) => $permintaan->url() === 'https://gateway.test/dokumen');
+        Http::assertSent(fn ($permintaan) => $permintaan->url() === 'https://gateway.test/kirim'
+            && str_contains((string) $this->bagian($permintaan, 'pesan'), 'Cek aplikasi.'));
+        $this->assertSame(1, Notifikasi::query()->where('user_id', $warga->id)->count());
+        $this->assertSame('terkirim', Notifikasi::query()->where('user_id', $warga->id)->value('status_kirim'));
+    }
+
+    public function test_format_selesai_mengirim_word_ke_whatsapp(): void
+    {
+        $warga = User::factory()->create([
+            'peran' => Peran::Warga,
+            'status_akun' => StatusAkun::Aktif,
+            'no_hp' => '081234567892',
+        ]);
+        $jenis = JenisLayanan::query()->create([
+            'nama' => 'Pernyataan Uji',
+            'kode' => 'NYATAUJI',
+            'daftar_syarat' => [],
+            'skema_field_tambahan' => [],
+            'template_surat' => 'surat.templates.dinamis',
+            'pernyataan' => true,
+        ]);
+        $pengajuan = Pengajuan::query()->create([
+            'kode_tiket' => 'LW-NYATA-WA',
+            'user_id' => $warga->id,
+            'jenis_layanan_id' => $jenis->id,
+            'data_form' => [],
+            'status' => StatusPengajuan::Diajukan,
+            'status_pengantar_rt' => 'tidak_perlu',
+            'tanggal_ajuan' => now(),
+        ]);
+        $this->siapkanWhatsapp();
+        $berkas = "PK\x03\x04format-uji";
+
+        app(PenerbitSurat::class)->kirimFormat(
+            $pengajuan,
+            User::factory()->create(['peran' => Peran::Operator]),
+            $berkas,
+            'Cetak lalu tanda tangani.',
+        );
+
+        Http::assertSent(fn ($permintaan) => $permintaan->url() === 'https://gateway.test/dokumen'
+            && $this->bagian($permintaan, 'berkas') === $berkas
+            && $this->namaBagian($permintaan, 'berkas') === 'lw-nyata-wa.docx'
+            && str_contains((string) $this->bagian($permintaan, 'pesan'), 'Cetak lalu tanda tangani.'));
+        $this->assertSame(StatusPengajuan::Selesai, $pengajuan->fresh()->status);
+    }
+
+    /**
+     * @return array{0: User, 1: Pengajuan}
+     */
+    private function pengajuanDisetujui(string $noHp): array
+    {
+        $warga = User::factory()->create([
+            'peran' => Peran::Warga,
+            'status_akun' => StatusAkun::Aktif,
+            'nik' => '3400000000000'.substr($noHp, -3),
+            'no_hp' => $noHp,
+        ]);
+        $jenis = JenisLayanan::query()->where('kode', 'NIKAH')->firstOrFail();
+        $pengajuan = Pengajuan::query()->create([
+            'kode_tiket' => 'LW-WA-'.$noHp,
+            'user_id' => $warga->id,
+            'jenis_layanan_id' => $jenis->id,
+            'data_form' => ['keperluan' => 'Nikah'],
+            'status' => StatusPengajuan::Disetujui,
+            'status_pengantar_rt' => 'diunggah',
+            'tanggal_ajuan' => now(),
+        ]);
+        Surat::query()->create([
+            'pengajuan_id' => $pengajuan->id,
+            'nomor_surat' => 'NIKAH/1/XI/2026',
+            'tahun' => 2026,
+            'nomor_urut' => 40,
+            'kode_verifikasi' => str_repeat('e', 32),
+        ]);
+
+        return [$warga, $pengajuan];
+    }
+
+    private function siapkanWhatsapp(bool $dokumenBerhasil = true): void
+    {
+        Http::fake([
+            'https://gateway.test/dokumen' => Http::response(['success' => $dokumenBerhasil], $dokumenBerhasil ? 200 : 503),
+            'https://gateway.test/kirim' => Http::response(['success' => true]),
+        ]);
+        config([
+            'surat.notifikasi.kanal' => 'whatsapp',
+            'surat.notifikasi.whatsapp_url' => 'https://gateway.test/kirim',
+            'surat.notifikasi.whatsapp_dokumen_url' => 'https://gateway.test/dokumen',
+            'surat.notifikasi.whatsapp_token' => 'token-uji',
+            'surat.notifikasi.nomor_whatsapp' => '0881080712007',
+        ]);
+    }
+
+    private function bagian(Request $permintaan, string $nama): ?string
+    {
+        $data = $permintaan->data();
+        $isi = is_string($data[$nama] ?? null)
+            ? $data[$nama]
+            : (collect($data)->firstWhere('name', $nama)['contents'] ?? null);
+
+        if ($isi instanceof StreamInterface) {
+            $isi->rewind();
+
+            return $isi->getContents();
+        }
+
+        return is_string($isi) ? $isi : null;
+    }
+
+    private function namaBagian(Request $permintaan, string $nama): ?string
+    {
+        $berkas = collect($permintaan->data())->firstWhere('name', $nama);
+
+        return is_array($berkas) ? ($berkas['filename'] ?? null) : null;
     }
 }
